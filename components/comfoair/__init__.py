@@ -8,6 +8,7 @@ from esphome.components import (
     climate,
     number,
     select,
+    switch,
     sensor,
     text_sensor,
     uart,
@@ -19,7 +20,9 @@ from esphome.const import (
     CONF_INITIAL_VALUE,
     CONF_MAX_VALUE,
     CONF_MIN_VALUE,
+    CONF_NAME,
     CONF_STEP,
+    ENTITY_CATEGORY_CONFIG,
     CONF_UART_ID,
     DEVICE_CLASS_CURRENT,
     DEVICE_CLASS_EMPTY,
@@ -48,13 +51,45 @@ ComfoAirNumber = comfoair_ns.class_("ComfoAirNumber", number.Number)
 ComfoAirSyncButton = comfoair_ns.class_("ComfoAirSyncButton", button.Button)
 ComfoAirFilterResetButton = comfoair_ns.class_("ComfoAirFilterResetButton", button.Button)
 ComfoAirErrorResetButton = comfoair_ns.class_("ComfoAirErrorResetButton", button.Button)
+ComfoAirSelfTestButton = comfoair_ns.class_("ComfoAirSelfTestButton", button.Button)
+ComfoAirTestModeSwitch = comfoair_ns.class_("ComfoAirTestModeSwitch", switch.Switch)
+ComfoAirTestOutputSwitch = comfoair_ns.class_("ComfoAirTestOutputSwitch", switch.Switch)
+ComfoAirTestAnalogNumber = comfoair_ns.class_("ComfoAirTestAnalogNumber", number.Number)
+ComfoAirTestFlapSelect = comfoair_ns.class_("ComfoAirTestFlapSelect", select.Select)
 # pylint: enable=invalid-name
 
 DEPENDENCIES = ["uart"]
-AUTO_LOAD = ["sensor", "climate", "binary_sensor", "text_sensor", "select", "number", "button"]
+AUTO_LOAD = [
+    "sensor",
+    "climate",
+    "binary_sensor",
+    "text_sensor",
+    "select",
+    "number",
+    "button",
+    "switch",
+]
 REQUIRED_KEY_NAME = "name"
 CONF_HUB_ID = "comfoair"
 CONF_PROXY_UART_ID = "proxy_uart"
+CONF_ENABLE_TEST_MODE = "enable_test_mode"
+CONF_ERROR_STATUS = "error_status"
+CONF_FILTER_RESET = "filter_reset"
+CONF_ERROR_RESET = "error_reset"
+CONF_SELF_TEST = "self_test"
+CONF_TEST_MODE = "test_mode"
+CONF_TEST_SUPPLY_FAN = "test_supply_fan"
+CONF_TEST_EXHAUST_FAN = "test_exhaust_fan"
+CONF_TEST_POSTHEAT = "test_postheat"
+CONF_TEST_BYPASS_FLAP = "test_bypass_flap"
+CONF_TEST_PREHEAT_FLAP = "test_preheat_flap"
+CONF_TEST_PREHEAT_RELAY = "test_preheat_relay"
+CONF_TEST_PREHEAT_TRIAC = "test_preheat_triac"
+CONF_TEST_EWT_SUPPLY = "test_ewt_supply"
+CONF_TEST_EWT_DIRECTION = "test_ewt_direction"
+CONF_TEST_KITCHEN_HOOD = "test_kitchen_hood"
+CONF_TEST_ERROR_OUTPUT = "test_error_output"
+CONF_TEST_FILTER_LED = "test_filter_led"
 
 UNIT_WEEK = "weeks"
 
@@ -81,9 +116,6 @@ CONF_SUPPLY_AIR_LEVEL = "supply_air_level"
 CONF_SUPPLY_FAN_ACTIVE = "supply_fan_active"
 CONF_FILTER_STATUS = "filter_status"
 CONF_FILTER_STATUS_FULL = "filter_status_full"
-CONF_ERROR_STATUS = "error_status"
-CONF_FILTER_RESET = "filter_reset"
-CONF_ERROR_RESET = "error_reset"
 CONF_BYPASS_PRESENT = "bypass_present"
 CONF_ENTHALPY_PRESENT = "enthalpy_present"
 CONF_EWT_PRESENT = "ewt_present"
@@ -555,6 +587,110 @@ comfoair_sensors_schemas = cv.Schema(
             ComfoAirErrorResetButton,
             icon="mdi:alert-circle-check",
         ),
+        cv.Optional(CONF_TEST_MODE): switch.switch_schema(
+            ComfoAirTestModeSwitch,
+            icon="mdi:test-tube",
+            entity_category=ENTITY_CATEGORY_CONFIG,
+            default_restore_mode="ALWAYS_OFF",
+            block_inverted=True,
+        ),
+        cv.Optional(CONF_SELF_TEST): button.button_schema(
+            ComfoAirSelfTestButton,
+            icon="mdi:clipboard-play-outline",
+            entity_category=ENTITY_CATEGORY_CONFIG,
+        ),
+        cv.Optional(CONF_TEST_SUPPLY_FAN): number.number_schema(
+            ComfoAirTestAnalogNumber,
+            unit_of_measurement=UNIT_PERCENT,
+            icon=ICON_FAN,
+            entity_category=ENTITY_CATEGORY_CONFIG,
+        ).extend({
+            cv.Optional(CONF_INITIAL_VALUE, default=0): cv.float_range(min=0, max=100),
+            cv.Optional(CONF_MIN_VALUE, default=0): cv.float_range(min=0, max=100),
+            cv.Optional(CONF_MAX_VALUE, default=100): cv.float_range(min=0, max=100),
+            cv.Optional(CONF_STEP, default=5): cv.positive_float,
+        }),
+        cv.Optional(CONF_TEST_EXHAUST_FAN): number.number_schema(
+            ComfoAirTestAnalogNumber,
+            unit_of_measurement=UNIT_PERCENT,
+            icon=ICON_FAN,
+            entity_category=ENTITY_CATEGORY_CONFIG,
+        ).extend({
+            cv.Optional(CONF_INITIAL_VALUE, default=0): cv.float_range(min=0, max=100),
+            cv.Optional(CONF_MIN_VALUE, default=0): cv.float_range(min=0, max=100),
+            cv.Optional(CONF_MAX_VALUE, default=100): cv.float_range(min=0, max=100),
+            cv.Optional(CONF_STEP, default=5): cv.positive_float,
+        }),
+        cv.Optional(CONF_TEST_POSTHEAT): number.number_schema(
+            ComfoAirTestAnalogNumber,
+            unit_of_measurement=UNIT_PERCENT,
+            icon="mdi:radiator",
+            entity_category=ENTITY_CATEGORY_CONFIG,
+        ).extend({
+            cv.Optional(CONF_INITIAL_VALUE, default=0): cv.float_range(min=0, max=100),
+            cv.Optional(CONF_MIN_VALUE, default=0): cv.float_range(min=0, max=100),
+            cv.Optional(CONF_MAX_VALUE, default=100): cv.float_range(min=0, max=100),
+            cv.Optional(CONF_STEP, default=5): cv.positive_float,
+        }),
+        cv.Optional(CONF_TEST_BYPASS_FLAP): select.select_schema(
+            ComfoAirTestFlapSelect,
+            icon="mdi:valve",
+            entity_category=ENTITY_CATEGORY_CONFIG,
+        ),
+        cv.Optional(CONF_TEST_PREHEAT_FLAP): select.select_schema(
+            ComfoAirTestFlapSelect,
+            icon="mdi:valve",
+            entity_category=ENTITY_CATEGORY_CONFIG,
+        ),
+        cv.Optional(CONF_TEST_PREHEAT_RELAY): switch.switch_schema(
+            ComfoAirTestOutputSwitch,
+            icon="mdi:electric-switch",
+            entity_category=ENTITY_CATEGORY_CONFIG,
+            default_restore_mode="ALWAYS_OFF",
+            block_inverted=True,
+        ),
+        cv.Optional(CONF_TEST_PREHEAT_TRIAC): switch.switch_schema(
+            ComfoAirTestOutputSwitch,
+            icon="mdi:electric-switch",
+            entity_category=ENTITY_CATEGORY_CONFIG,
+            default_restore_mode="ALWAYS_OFF",
+            block_inverted=True,
+        ),
+        cv.Optional(CONF_TEST_EWT_SUPPLY): switch.switch_schema(
+            ComfoAirTestOutputSwitch,
+            icon="mdi:electric-switch",
+            entity_category=ENTITY_CATEGORY_CONFIG,
+            default_restore_mode="ALWAYS_OFF",
+            block_inverted=True,
+        ),
+        cv.Optional(CONF_TEST_EWT_DIRECTION): switch.switch_schema(
+            ComfoAirTestOutputSwitch,
+            icon="mdi:electric-switch",
+            entity_category=ENTITY_CATEGORY_CONFIG,
+            default_restore_mode="ALWAYS_OFF",
+            block_inverted=True,
+        ),
+        cv.Optional(CONF_TEST_KITCHEN_HOOD): switch.switch_schema(
+            ComfoAirTestOutputSwitch,
+            icon="mdi:electric-switch",
+            entity_category=ENTITY_CATEGORY_CONFIG,
+            default_restore_mode="ALWAYS_OFF",
+            block_inverted=True,
+        ),
+        cv.Optional(CONF_TEST_ERROR_OUTPUT): switch.switch_schema(
+            ComfoAirTestOutputSwitch,
+            icon="mdi:electric-switch",
+            entity_category=ENTITY_CATEGORY_CONFIG,
+            default_restore_mode="ALWAYS_OFF",
+            block_inverted=True,
+        ),
+        cv.Optional(CONF_TEST_FILTER_LED): switch.switch_schema(
+            ComfoAirTestOutputSwitch,
+            icon="mdi:led-on",
+            entity_category=ENTITY_CATEGORY_CONFIG,
+            default_restore_mode="ALWAYS_OFF",
+            block_inverted=True,
+        ),
     }
 )
 
@@ -562,6 +698,7 @@ CONFIG_SCHEMA = (
     climate.climate_schema(ComfoAirComponent).extend(
         {
             cv.Required(REQUIRED_KEY_NAME): cv.string,
+            cv.Optional(CONF_ENABLE_TEST_MODE, default=False): cv.boolean,
             cv.Optional(CONF_PROXY_UART_ID): cv.use_id(uart.UARTComponent),
         }
     )
@@ -636,3 +773,48 @@ async def to_code(config):
             if sens is not None:
                 func = getattr(var, "set_" + v)
                 cg.add(func(sens))
+
+    if config.get(CONF_ENABLE_TEST_MODE, False):
+        await test_mode_to_code(var, config)
+
+
+async def test_mode_to_code(var, config):
+    """Generates the test-mode entities that the config lists"""
+    if CONF_TEST_MODE in config:
+        test_switch = await switch.new_switch(config[CONF_TEST_MODE])
+        cg.add(var.set_test_mode_switch(test_switch))
+    if CONF_SELF_TEST in config:
+        test_button = await button.new_button(config[CONF_SELF_TEST])
+        cg.add(var.set_self_test(test_button))
+    for key, setter in (
+        (CONF_TEST_SUPPLY_FAN, "set_test_supply_fan"),
+        (CONF_TEST_EXHAUST_FAN, "set_test_exhaust_fan"),
+        (CONF_TEST_POSTHEAT, "set_test_postheat"),
+    ):
+        if key in config:
+            num = await number.new_number(
+                config[key],
+                min_value=config[key][CONF_MIN_VALUE],
+                max_value=config[key][CONF_MAX_VALUE],
+                step=config[key][CONF_STEP],
+            )
+            cg.add(getattr(var, setter)(num))
+    for key, setter in (
+        (CONF_TEST_BYPASS_FLAP, "set_test_bypass_flap"),
+        (CONF_TEST_PREHEAT_FLAP, "set_test_preheat_flap"),
+    ):
+        if key in config:
+            sel = await select.new_select(config[key], options=["Closed", "Open", "Stop"])
+            cg.add(getattr(var, setter)(sel))
+    for key, setter in (
+        (CONF_TEST_PREHEAT_RELAY, "set_test_preheat_relay"),
+        (CONF_TEST_PREHEAT_TRIAC, "set_test_preheat_triac"),
+        (CONF_TEST_EWT_SUPPLY, "set_test_ewt_supply"),
+        (CONF_TEST_EWT_DIRECTION, "set_test_ewt_direction"),
+        (CONF_TEST_KITCHEN_HOOD, "set_test_kitchen_hood"),
+        (CONF_TEST_ERROR_OUTPUT, "set_test_error_output"),
+        (CONF_TEST_FILTER_LED, "set_test_filter_led"),
+    ):
+        if key in config:
+            test_switch = await switch.new_switch(config[key])
+            cg.add(getattr(var, setter)(test_switch))
