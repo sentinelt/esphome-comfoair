@@ -170,6 +170,7 @@ comfoair:
     name: "Filter reset"
   error_reset:
     name: "Error reset"
+  # enable_test_mode: true
   enthalpy_present:
     name: "Enthalpy present"
   ewt_present:

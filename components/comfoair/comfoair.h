@@ -2,6 +2,7 @@
 
 #include "esphome.h"
 #include "esphome/components/button/button.h"
+#include "esphome/components/switch/switch.h"
 #include "esphome/components/climate/climate.h"
 #include "esphome/components/climate/climate_mode.h"
 #include "esphome/components/climate/climate_traits.h"
@@ -103,6 +104,74 @@ private:
   ComfoAirComponent *parent_{nullptr};
 };
 
+class ComfoAirSelfTestButton : public button::Button
+{
+public:
+  void set_parent(ComfoAirComponent *parent) { this->parent_ = parent; }
+
+protected:
+  void press_action() override;
+
+private:
+  ComfoAirComponent *parent_{nullptr};
+};
+
+/// Master switch: enter (0x01) / exit (0x19) unit test mode.
+class ComfoAirTestModeSwitch : public switch_::Switch
+{
+public:
+  void set_parent(ComfoAirComponent *parent) { this->parent_ = parent; }
+
+protected:
+  void write_state(bool state) override;
+
+private:
+  ComfoAirComponent *parent_{nullptr};
+};
+
+/// One bit of CMD_SET_OUTPUTS (relay mask or filter-LED feedback byte).
+class ComfoAirTestOutputSwitch : public switch_::Switch
+{
+public:
+  void set_parent(ComfoAirComponent *parent) { this->parent_ = parent; }
+  void set_bit_mask(uint8_t mask) { this->bit_mask_ = mask; }
+  void set_feedback_byte(bool feedback) { this->feedback_byte_ = feedback; }
+
+protected:
+  void write_state(bool state) override;
+
+private:
+  ComfoAirComponent *parent_{nullptr};
+  uint8_t bit_mask_{0};
+  bool feedback_byte_{false};
+};
+
+/// CMD_SET_ANALOG_OUTPUTS channel (supply / exhaust / post-heat %).
+class ComfoAirTestAnalogNumber : public number::Number
+{
+public:
+  void set_parent(ComfoAirComponent *parent) { this->parent_ = parent; }
+
+protected:
+  void control(float value) override;
+
+private:
+  ComfoAirComponent *parent_{nullptr};
+};
+
+/// CMD_SET_FLAPS channel (bypass or preheat): Closed / Open / Stop.
+class ComfoAirTestFlapSelect : public select::Select
+{
+public:
+  void set_parent(ComfoAirComponent *parent) { this->parent_ = parent; }
+
+protected:
+  void control(const std::string &value) override;
+
+private:
+  ComfoAirComponent *parent_{nullptr};
+};
+
 class ComfoAirComponent : public climate::Climate, public PollingComponent, public uart::UARTDevice
 {
   friend class ComfoAirSizeSelect;
@@ -110,6 +179,11 @@ class ComfoAirComponent : public climate::Climate, public PollingComponent, publ
   friend class ComfoAirSyncButton;
   friend class ComfoAirFilterResetButton;
   friend class ComfoAirErrorResetButton;
+  friend class ComfoAirSelfTestButton;
+  friend class ComfoAirTestModeSwitch;
+  friend class ComfoAirTestOutputSwitch;
+  friend class ComfoAirTestAnalogNumber;
+  friend class ComfoAirTestFlapSelect;
 
 public:
   // Poll every 2000ms (previously 600ms)
@@ -222,6 +296,10 @@ public:
     // the middle of a multi-frame display refresh.
     if (this->has_proxy_uart_ && this->last_display_frame_ != 0 &&
         (millis() - this->last_display_frame_) < DISPLAY_QUIET_MS)
+    {
+      return;
+    }
+    if (this->test_mode_active_)
     {
       return;
     }
@@ -350,6 +428,32 @@ public:
   {
     this->uart_proxy_.set_uart_parent(proxy);
     this->has_proxy_uart_ = true;
+  }
+
+  void self_test(void)
+  {
+    ESP_LOGI(TAG, "Starting self-test");
+    uint8_t cmd[CMD_RESET_AND_SELF_TEST_LENGTH] = {0, 0, 1, 0};
+    write_command_(CMD_RESET_AND_SELF_TEST, cmd, sizeof(cmd));
+  }
+
+  void set_test_mode(bool enable)
+  {
+    if (enable)
+    {
+      ESP_LOGI(TAG, "Entering test mode");
+      write_command_(CMD_SET_TEST_MODE, nullptr, 0);
+      this->test_mode_active_ = true;
+    }
+    else
+    {
+      ESP_LOGI(TAG, "Exiting test mode");
+      write_command_(CMD_EXIT_TEST_MODE, nullptr, 0);
+      this->test_mode_active_ = false;
+      this->reset_test_controls_();
+    }
+    if (this->test_mode_switch_ != nullptr)
+      this->test_mode_switch_->publish_state(enable);
   }
   bool set_unit_size(uint8_t raw_size);
   void set_size_select(ComfoAirSizeSelect *size_select);
@@ -1315,40 +1419,6 @@ protected:
 
   // --- getter ---
 
-  void append_fault_bits_(std::string &out, uint8_t bits, const char *prefix, int start_num) const
-  {
-    for (int i = 0; i < 8; i++)
-    {
-      if (bits & (1u << i))
-      {
-        if (!out.empty())
-          out += ", ";
-        out += prefix;
-        out += std::to_string(start_num + i);
-      }
-    }
-  }
-
-  void append_fault_ahigh_(std::string &out, uint8_t bits) const
-  {
-    for (int i = 0; i < 7; i++)
-    {
-      if (bits & (1u << i))
-      {
-        if (!out.empty())
-          out += ", ";
-        out += "A";
-        out += std::to_string(9 + i);
-      }
-    }
-    if (bits & 0x80)
-    {
-      if (!out.empty())
-        out += ", ";
-      out += "A0";
-    }
-  }
-
   void get_fan_status_()
   {
     if (intake_fan_speed != nullptr || exhaust_fan_speed != nullptr || intake_fan_speed_rpm != nullptr ||
@@ -1562,6 +1632,138 @@ protected:
     }
   }
 
+  void append_fault_bits_(std::string &out, uint8_t bits, const char *prefix, int start_num) const
+  {
+    for (int i = 0; i < 8; i++)
+    {
+      if (bits & (1u << i))
+      {
+        if (!out.empty())
+          out += ", ";
+        out += prefix;
+        out += std::to_string(start_num + i);
+      }
+    }
+  }
+
+  void append_fault_ahigh_(std::string &out, uint8_t bits) const
+  {
+    for (int i = 0; i < 7; i++)
+    {
+      if (bits & (1u << i))
+      {
+        if (!out.empty())
+          out += ", ";
+        out += "A";
+        out += std::to_string(9 + i);
+      }
+    }
+    if (bits & 0x80)
+    {
+      if (!out.empty())
+        out += ", ";
+      out += "A0";
+    }
+  }
+
+  static uint8_t flap_label_to_value_(const std::string &label)
+  {
+    if (label == "Open")
+      return 1;
+    if (label == "Stop")
+      return 3;
+    return 0;
+  }
+
+  uint8_t flap_current_value_(ComfoAirTestFlapSelect *sel) const
+  {
+    if (sel == nullptr)
+      return 0;
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+    return flap_label_to_value_(sel->state);
+#pragma GCC diagnostic pop
+  }
+
+  void apply_test_outputs_()
+  {
+    if (!this->test_mode_active_)
+    {
+      ESP_LOGW(TAG, "Ignoring SET_OUTPUTS: not in test mode");
+      return;
+    }
+    uint8_t data[2] = {0, 0};
+    auto bit_on = [](ComfoAirTestOutputSwitch *s) -> bool { return s != nullptr && s->state; };
+    if (bit_on(this->test_preheat_relay_))
+      data[0] |= 0x01;
+    if (bit_on(this->test_preheat_triac_))
+      data[0] |= 0x02;
+    if (bit_on(this->test_ewt_supply_))
+      data[0] |= 0x04;
+    if (bit_on(this->test_ewt_direction_))
+      data[0] |= 0x08;
+    if (bit_on(this->test_kitchen_hood_))
+      data[0] |= 0x10;
+    if (bit_on(this->test_error_output_))
+      data[0] |= 0x20;
+    if (bit_on(this->test_filter_led_))
+      data[1] |= 0x01;
+    write_command_(CMD_SET_OUTPUTS, data, sizeof(data));
+  }
+
+  void apply_test_analog_outputs_()
+  {
+    if (!this->test_mode_active_)
+    {
+      ESP_LOGW(TAG, "Ignoring SET_ANALOG_OUTPUTS: not in test mode");
+      return;
+    }
+    auto pct = [](ComfoAirTestAnalogNumber *n) -> uint8_t {
+      if (n == nullptr)
+        return 0;
+      return static_cast<uint8_t>(std::clamp(static_cast<int>(n->state), 0, 100));
+    };
+    uint8_t data[3] = {pct(this->test_supply_fan_), pct(this->test_exhaust_fan_), pct(this->test_postheat_)};
+    write_command_(CMD_SET_ANALOG_OUTPUTS, data, sizeof(data));
+  }
+
+  void apply_test_flaps_()
+  {
+    if (!this->test_mode_active_)
+    {
+      ESP_LOGW(TAG, "Ignoring SET_FLAPS: not in test mode");
+      return;
+    }
+    uint8_t data[2] = {this->flap_current_value_(this->test_bypass_flap_),
+                       this->flap_current_value_(this->test_preheat_flap_)};
+    write_command_(CMD_SET_FLAPS, data, sizeof(data));
+  }
+
+  void reset_test_controls_()
+  {
+    auto off_sw = [](switch_::Switch *s) {
+      if (s != nullptr)
+        s->publish_state(false);
+    };
+    off_sw(this->test_preheat_relay_);
+    off_sw(this->test_preheat_triac_);
+    off_sw(this->test_ewt_supply_);
+    off_sw(this->test_ewt_direction_);
+    off_sw(this->test_kitchen_hood_);
+    off_sw(this->test_error_output_);
+    off_sw(this->test_filter_led_);
+    if (this->test_supply_fan_ != nullptr)
+      this->test_supply_fan_->publish_state(0);
+    if (this->test_exhaust_fan_ != nullptr)
+      this->test_exhaust_fan_->publish_state(0);
+    if (this->test_postheat_ != nullptr)
+      this->test_postheat_->publish_state(0);
+    if (this->test_bypass_flap_ != nullptr)
+      this->test_bypass_flap_->publish_state("Closed");
+    if (this->test_preheat_flap_ != nullptr)
+      this->test_preheat_flap_->publish_state("Closed");
+  }
+
   uint8_t caRxBuffer_au8[MAX_MESSAGE_SIZE]{};
   uint8_t caRxIdx_u8 = 0;
   uint8_t proxy_rx_buffer_[MAX_MESSAGE_SIZE]{};
@@ -1571,10 +1773,28 @@ protected:
   bool proxy_pending_is_ack_{false};
   bool has_proxy_uart_{false};
   bool last_command_sent_{true};
+  bool test_mode_active_{false};
   BusOwner bus_owner_{BusOwner::IDLE};
   uint32_t bus_busy_since_{0};
   uint32_t last_display_frame_{0};
   uart::UARTDevice uart_proxy_;
+  text_sensor::TextSensor *error_status{nullptr};
+  ComfoAirFilterResetButton *filter_reset_button_{nullptr};
+  ComfoAirErrorResetButton *error_reset_button_{nullptr};
+  ComfoAirSelfTestButton *self_test_button_{nullptr};
+  ComfoAirTestModeSwitch *test_mode_switch_{nullptr};
+  ComfoAirTestOutputSwitch *test_preheat_relay_{nullptr};
+  ComfoAirTestOutputSwitch *test_preheat_triac_{nullptr};
+  ComfoAirTestOutputSwitch *test_ewt_supply_{nullptr};
+  ComfoAirTestOutputSwitch *test_ewt_direction_{nullptr};
+  ComfoAirTestOutputSwitch *test_kitchen_hood_{nullptr};
+  ComfoAirTestOutputSwitch *test_error_output_{nullptr};
+  ComfoAirTestOutputSwitch *test_filter_led_{nullptr};
+  ComfoAirTestAnalogNumber *test_supply_fan_{nullptr};
+  ComfoAirTestAnalogNumber *test_exhaust_fan_{nullptr};
+  ComfoAirTestAnalogNumber *test_postheat_{nullptr};
+  ComfoAirTestFlapSelect *test_bypass_flap_{nullptr};
+  ComfoAirTestFlapSelect *test_preheat_flap_{nullptr};
   int8_t update_counter_{-10};
   uint8_t status_payload_[8]{0};
   bool status_payload_valid_{false};
@@ -1590,7 +1810,6 @@ public:
   text_sensor::TextSensor *type{nullptr};
   text_sensor::TextSensor *size{nullptr};
   text_sensor::TextSensor *filter_status{nullptr};
-  text_sensor::TextSensor *error_status{nullptr};
   binary_sensor::BinarySensor *filter_status_full{nullptr};
   text_sensor::TextSensor *frost_protection_level{nullptr};
   text_sensor::TextSensor *preheating_valve{nullptr};
@@ -1674,8 +1893,6 @@ public:
   ComfoAirNumber *supply_air_level_medium{nullptr};
   ComfoAirNumber *supply_air_level_high{nullptr};
   ComfoAirSyncButton *sync_button_{nullptr};
-  ComfoAirFilterResetButton *filter_reset_button_{nullptr};
-  ComfoAirErrorResetButton *error_reset_button_{nullptr};
 
   // public functions
 
@@ -1914,7 +2131,6 @@ public:
     if (button != nullptr)
       button->set_parent(this);
   }
-  void set_error_status(text_sensor::TextSensor *sensor) { this->error_status = sensor; }
   void set_filter_reset(ComfoAirFilterResetButton *button)
   {
     this->filter_reset_button_ = button;
@@ -1926,6 +2142,81 @@ public:
     this->error_reset_button_ = button;
     if (button != nullptr)
       button->set_parent(this);
+  }
+  void set_error_status(text_sensor::TextSensor *sensor) { this->error_status = sensor; }
+  void set_self_test(ComfoAirSelfTestButton *button)
+  {
+    this->self_test_button_ = button;
+    if (button != nullptr)
+      button->set_parent(this);
+  }
+  void set_test_mode_switch(ComfoAirTestModeSwitch *test_switch)
+  {
+    this->test_mode_switch_ = test_switch;
+    if (test_switch != nullptr)
+      test_switch->set_parent(this);
+  }
+  void set_test_preheat_relay(ComfoAirTestOutputSwitch *test_switch) { this->bind_test_output_(test_switch, 0x01, false); }
+  void set_test_preheat_triac(ComfoAirTestOutputSwitch *test_switch) { this->bind_test_output_(test_switch, 0x02, false); }
+  void set_test_ewt_supply(ComfoAirTestOutputSwitch *test_switch) { this->bind_test_output_(test_switch, 0x04, false); }
+  void set_test_ewt_direction(ComfoAirTestOutputSwitch *test_switch) { this->bind_test_output_(test_switch, 0x08, false); }
+  void set_test_kitchen_hood(ComfoAirTestOutputSwitch *test_switch) { this->bind_test_output_(test_switch, 0x10, false); }
+  void set_test_error_output(ComfoAirTestOutputSwitch *test_switch) { this->bind_test_output_(test_switch, 0x20, false); }
+  void set_test_filter_led(ComfoAirTestOutputSwitch *test_switch) { this->bind_test_output_(test_switch, 0x01, true); }
+  void set_test_supply_fan(ComfoAirTestAnalogNumber *number)
+  {
+    this->test_supply_fan_ = number;
+    if (number != nullptr)
+      number->set_parent(this);
+  }
+  void set_test_exhaust_fan(ComfoAirTestAnalogNumber *number)
+  {
+    this->test_exhaust_fan_ = number;
+    if (number != nullptr)
+      number->set_parent(this);
+  }
+  void set_test_postheat(ComfoAirTestAnalogNumber *number)
+  {
+    this->test_postheat_ = number;
+    if (number != nullptr)
+      number->set_parent(this);
+  }
+  void set_test_bypass_flap(ComfoAirTestFlapSelect *flap)
+  {
+    this->test_bypass_flap_ = flap;
+    if (flap != nullptr)
+      flap->set_parent(this);
+  }
+  void set_test_preheat_flap(ComfoAirTestFlapSelect *flap)
+  {
+    this->test_preheat_flap_ = flap;
+    if (flap != nullptr)
+      flap->set_parent(this);
+  }
+
+protected:
+  void bind_test_output_(ComfoAirTestOutputSwitch *test_switch, uint8_t mask, bool feedback)
+  {
+    if (mask == 0x01 && feedback)
+      this->test_filter_led_ = test_switch;
+    else if (mask == 0x01)
+      this->test_preheat_relay_ = test_switch;
+    else if (mask == 0x02)
+      this->test_preheat_triac_ = test_switch;
+    else if (mask == 0x04)
+      this->test_ewt_supply_ = test_switch;
+    else if (mask == 0x08)
+      this->test_ewt_direction_ = test_switch;
+    else if (mask == 0x10)
+      this->test_kitchen_hood_ = test_switch;
+    else if (mask == 0x20)
+      this->test_error_output_ = test_switch;
+    if (test_switch != nullptr)
+    {
+      test_switch->set_parent(this);
+      test_switch->set_bit_mask(mask);
+      test_switch->set_feedback_byte(feedback);
+    }
   }
 };
 
@@ -2087,6 +2378,39 @@ inline void ComfoAirErrorResetButton::press_action()
 {
   if (this->parent_ != nullptr)
     this->parent_->error_reset();
+}
+
+inline void ComfoAirSelfTestButton::press_action()
+{
+  if (this->parent_ != nullptr)
+    this->parent_->self_test();
+}
+
+inline void ComfoAirTestModeSwitch::write_state(bool state)
+{
+  if (this->parent_ != nullptr)
+    this->parent_->set_test_mode(state);
+}
+
+inline void ComfoAirTestOutputSwitch::write_state(bool state)
+{
+  this->publish_state(state);
+  if (this->parent_ != nullptr)
+    this->parent_->apply_test_outputs_();
+}
+
+inline void ComfoAirTestAnalogNumber::control(float value)
+{
+  this->publish_state(value);
+  if (this->parent_ != nullptr)
+    this->parent_->apply_test_analog_outputs_();
+}
+
+inline void ComfoAirTestFlapSelect::control(const std::string &value)
+{
+  this->publish_state(value);
+  if (this->parent_ != nullptr)
+    this->parent_->apply_test_flaps_();
 }
 
 } // namespace comfoair
